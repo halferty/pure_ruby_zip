@@ -9,11 +9,11 @@ Gem::Specification.new do |spec|
   spec.authors       = ["Edward Halferty"]
   spec.email         = ["me@edwardhalferty.com"]
 
-  spec.summary       = "A pure-Ruby ZIP file decompressor/compressor"
+  spec.summary       = "A pure-Ruby ZIP file decompressor"
   spec.description   = %q(
-    A pure-Ruby ZIP file decompressor/compressor.
-    VERY inefficient, possibly buggy.
-    Mostly for entertainment value.
+    A pure-Ruby ZIP file decompressor with no external dependencies.
+    Supports DEFLATE compression and provides comprehensive error handling,
+    security protections, and a clean API for extracting ZIP archives.
   ).strip
   spec.homepage      = "https://github.com/ehalferty/pure_ruby_zip"
   spec.license       = "MIT"
@@ -21,9 +21,18 @@ Gem::Specification.new do |spec|
   spec.bindir        = "bin"
   spec.executables   = ["pure-ruby-zip"]
   spec.require_paths = ["lib"]
+  spec.required_ruby_version = ">= 2.5.0"
 
-  spec.files = ["lib/pure_ruby_zip.rb", "lib/pure_ruby_zip/version.rb"]
+  spec.files = ["lib/pure_ruby_zip.rb", "lib/pure_ruby_zip/version.rb", "README.md", "LICENSE.txt"]
 
-  spec.add_development_dependency "bundler", "~> 1.17"
-  spec.add_development_dependency "rake", "~> 10.0"
+  # No runtime dependencies - pure Ruby!
+
+  # Development dependencies
+  spec.add_development_dependency "rake", "~> 13.0"
+  spec.add_development_dependency "rspec", "~> 3.12"
+
+  spec.metadata = {
+    "bug_tracker_uri" => "https://github.com/ehalferty/pure_ruby_zip/issues",
+    "source_code_uri" => "https://github.com/ehalferty/pure_ruby_zip",
+  }
 end
