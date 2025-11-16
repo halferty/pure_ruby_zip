@@ -41,6 +41,30 @@ module PureRubyZip
   EOCD_SIGNATURE = "\x50\x4b\x05\x06".freeze
   CENTRAL_DIR_SIGNATURE = "\x50\x4b\x01\x02".freeze
   LOCAL_FILE_SIGNATURE = "\x50\x4b\x03\x04".freeze
+  DATA_DESCRIPTOR_SIGNATURE = "\x50\x4b\x07\x08".freeze
+
+  # CRC32 calculation for ZIP file integrity
+  module CRC32
+    # CRC32 lookup table (IEEE polynomial 0xEDB88320)
+    TABLE = (0..255).map do |i|
+      crc = i
+      8.times do
+        crc = (crc >> 1) ^ ((crc & 1) * 0xEDB88320)
+      end
+      crc
+    end.freeze
+
+    # Calculate CRC32 checksum for data
+    # @param data [String] binary data to checksum
+    # @return [Integer] CRC32 checksum
+    def self.checksum(data)
+      crc = 0xFFFFFFFF
+      data.bytes.each do |byte|
+        crc = (crc >> 8) ^ TABLE[(crc ^ byte) & 0xFF]
+      end
+      ~crc & 0xFFFFFFFF
+    end
+  end
   # Bitstream reader for reading individual bits from compressed data
   # Performance optimized to use byte array instead of string slicing
   class Bitstream
@@ -304,6 +328,80 @@ module PureRubyZip
       end
 
       file_data
+    end
+  end
+
+  # Bitstream writer for writing individual bits to compressed data
+  class BitstreamWriter
+    def initialize
+      @bytes = []
+      @current_byte = 0
+      @bit_index = 0
+    end
+
+    # Write a single bit
+    # @param bit [Boolean, Integer] bit value (true/1 or false/0)
+    def write_bit(bit)
+      bit_value = bit ? 1 : 0
+      @current_byte |= (bit_value << @bit_index)
+      @bit_index += 1
+
+      if @bit_index == 8
+        @bytes << @current_byte
+        @current_byte = 0
+        @bit_index = 0
+      end
+    end
+
+    # Write multiple bits as an integer (little-endian)
+    # @param value [Integer] value to write
+    # @param n_bits [Integer] number of bits to write
+    def write_int(value, n_bits)
+      n_bits.times do |i|
+        write_bit((value >> i) & 1)
+      end
+    end
+
+    # Flush any remaining bits and return the byte array
+    # @return [String] binary data
+    def to_binary
+      @bytes << @current_byte if @bit_index > 0
+      @bytes.pack("C*")
+    end
+  end
+
+  # DEFLATE compressor
+  class ZipCompressor
+    # Compress data using stored method (no compression)
+    # @param data [String] data to compress
+    # @return [String] compressed data (same as input for stored method)
+    def compress_stored(data)
+      data
+    end
+
+    # Compress data using DEFLATE with uncompressed blocks
+    # @param data [String] data to compress
+    # @return [String] compressed data in DEFLATE format
+    def compress_deflate(data)
+      result = []
+
+      # DEFLATE header: final block (1 bit) + uncompressed block type (2 bits = 00)
+      # This gives us: 0b00000001 = 0x01 (bit 0 = final, bits 1-2 = block type 0)
+      result << 0x01
+
+      # Length (2 bytes, little-endian)
+      len = data.length & 0xFFFF
+      result << (len & 0xFF)
+      result << ((len >> 8) & 0xFF)
+
+      # One's complement of length (2 bytes, little-endian)
+      nlen = (~len) & 0xFFFF
+      result << (nlen & 0xFF)
+      result << ((nlen >> 8) & 0xFF)
+
+      # Data bytes
+      result_str = result.pack("C*")
+      result_str + data
     end
   end
   # Helper methods for reading ZIP file structures
@@ -731,6 +829,204 @@ module PureRubyZip
           @items[filename] = item
         end
       end
+    end
+  end
+
+  # ZIP file writer for creating ZIP archives
+  class ZipWriter
+    include ZipHelpers
+
+    # Create a new ZIP file with a block
+    # @param filename [String] path to the ZIP file to create
+    # @yield [writer] yields the writer instance to the block
+    # @return [ZipWriter] the writer instance
+    # @example
+    #   ZipWriter.create("archive.zip") do |zip|
+    #     zip.add_file("file.txt")
+    #     zip.add_file("data.csv", "exports/data.csv")
+    #     zip.add_buffer("Hello", "greeting.txt")
+    #   end
+    def self.create(filename, &block)
+      writer = new(filename)
+      block.call(writer) if block_given?
+      writer.close
+      writer
+    end
+
+    # Initialize a new ZIP writer
+    # @param filename [String] path to the ZIP file to create
+    def initialize(filename)
+      @filename = filename
+      @file = File.open(filename, "wb")
+      @entries = []
+      @compressor = ZipCompressor.new
+    end
+
+    # Add a file to the ZIP archive
+    # @param source_path [String] path to the source file
+    # @param zip_path [String, nil] path in the ZIP archive (defaults to basename of source)
+    # @param compression [Symbol] compression method (:stored or :deflate)
+    # @raise [Errno::ENOENT] if source file doesn't exist
+    def add_file(source_path, zip_path = nil, compression: :deflate)
+      raise Errno::ENOENT, "File not found: #{source_path}" unless File.exist?(source_path)
+      raise ArgumentError, "Cannot add directory: #{source_path}" if File.directory?(source_path)
+
+      # Use basename if no zip_path specified
+      zip_path ||= File.basename(source_path)
+
+      # Read file data
+      data = File.binread(source_path)
+
+      # Add to archive
+      add_buffer(data, zip_path, compression: compression)
+    end
+
+    # Add data from memory to the ZIP archive
+    # @param data [String] binary data to add
+    # @param zip_path [String] path in the ZIP archive
+    # @param compression [Symbol] compression method (:stored or :deflate)
+    def add_buffer(data, zip_path, compression: :deflate)
+      raise ArgumentError, "zip_path is required" if zip_path.nil? || zip_path.empty?
+
+      # Determine compression method
+      compression_method = case compression
+      when :stored
+        0
+      when :deflate
+        8
+      else
+        raise ArgumentError, "Unsupported compression method: #{compression}"
+      end
+
+      # Compress data
+      compressed_data = case compression_method
+      when 0
+        @compressor.compress_stored(data)
+      when 8
+        @compressor.compress_deflate(data)
+      end
+
+      # Calculate CRC32
+      crc32 = CRC32.checksum(data)
+
+      # Get current file offset
+      local_header_offset = @file.pos
+
+      # Write local file header
+      write_local_file_header(
+        zip_path,
+        compression_method,
+        crc32,
+        compressed_data.length,
+        data.length
+      )
+
+      # Write compressed data
+      @file.write(compressed_data)
+
+      # Store entry info for central directory
+      @entries << {
+        zip_path: zip_path,
+        compression_method: compression_method,
+        crc32: crc32,
+        compressed_size: compressed_data.length,
+        uncompressed_size: data.length,
+        local_header_offset: local_header_offset
+      }
+    end
+
+    # Close the ZIP file and write central directory
+    def close
+      return if @file.nil?
+
+      # Write central directory
+      central_dir_offset = @file.pos
+      @entries.each do |entry|
+        write_central_directory_header(entry)
+      end
+
+      # Write end of central directory
+      central_dir_size = @file.pos - central_dir_offset
+      write_end_of_central_directory(central_dir_offset, central_dir_size)
+
+      @file.close
+      @file = nil
+    end
+
+    private
+
+    # Write a little-endian integer to file
+    # @param value [Integer] value to write
+    # @param bytes [Integer] number of bytes to write
+    def write_int(value, bytes)
+      bytes.times do |i|
+        @file.write([(value >> (8 * i)) & 0xFF].pack("C"))
+      end
+    end
+
+    # Get current DOS time
+    # @return [Integer] DOS time (2 bytes)
+    def dos_time
+      now = Time.now
+      ((now.hour << 11) | (now.min << 5) | (now.sec / 2)) & 0xFFFF
+    end
+
+    # Get current DOS date
+    # @return [Integer] DOS date (2 bytes)
+    def dos_date
+      now = Time.now
+      year = now.year >= 1980 ? now.year - 1980 : 0
+      ((year << 9) | (now.month << 5) | now.day) & 0xFFFF
+    end
+
+    # Write local file header
+    def write_local_file_header(filename, compression_method, crc32, compressed_size, uncompressed_size)
+      @file.write(LOCAL_FILE_SIGNATURE)
+      write_int(20, 2)                    # version needed to extract (2.0)
+      write_int(0, 2)                     # general purpose bit flag
+      write_int(compression_method, 2)    # compression method
+      write_int(dos_time, 2)              # last mod file time
+      write_int(dos_date, 2)              # last mod file date
+      write_int(crc32, 4)                 # crc-32
+      write_int(compressed_size, 4)       # compressed size
+      write_int(uncompressed_size, 4)     # uncompressed size
+      write_int(filename.bytesize, 2)     # filename length
+      write_int(0, 2)                     # extra field length
+      @file.write(filename)               # filename
+    end
+
+    # Write central directory header
+    def write_central_directory_header(entry)
+      @file.write(CENTRAL_DIR_SIGNATURE)
+      write_int(20, 2)                              # version made by (2.0)
+      write_int(20, 2)                              # version needed to extract (2.0)
+      write_int(0, 2)                               # general purpose bit flag
+      write_int(entry[:compression_method], 2)      # compression method
+      write_int(dos_time, 2)                        # last mod file time
+      write_int(dos_date, 2)                        # last mod file date
+      write_int(entry[:crc32], 4)                   # crc-32
+      write_int(entry[:compressed_size], 4)         # compressed size
+      write_int(entry[:uncompressed_size], 4)       # uncompressed size
+      write_int(entry[:zip_path].bytesize, 2)       # filename length
+      write_int(0, 2)                               # extra field length
+      write_int(0, 2)                               # file comment length
+      write_int(0, 2)                               # disk number start
+      write_int(0, 2)                               # internal file attributes
+      write_int(0, 4)                               # external file attributes
+      write_int(entry[:local_header_offset], 4)     # relative offset of local header
+      @file.write(entry[:zip_path])                 # filename
+    end
+
+    # Write end of central directory record
+    def write_end_of_central_directory(central_dir_offset, central_dir_size)
+      @file.write(EOCD_SIGNATURE)
+      write_int(0, 2)                     # disk number
+      write_int(0, 2)                     # disk with central directory
+      write_int(@entries.length, 2)       # number of entries on this disk
+      write_int(@entries.length, 2)       # total number of entries
+      write_int(central_dir_size, 4)      # size of central directory
+      write_int(central_dir_offset, 4)    # offset of central directory
+      write_int(0, 2)                     # comment length
     end
   end
 end
