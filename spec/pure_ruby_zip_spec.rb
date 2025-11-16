@@ -359,3 +359,290 @@ RSpec.describe PureRubyZip::ZipHelpers do
     end
   end
 end
+
+RSpec.describe PureRubyZip::CRC32 do
+  describe ".checksum" do
+    it "calculates correct CRC32 for empty string" do
+      expect(PureRubyZip::CRC32.checksum("")).to eq(0)
+    end
+
+    it "calculates correct CRC32 for simple data" do
+      # Known CRC32 value for "Hello, World!"
+      expect(PureRubyZip::CRC32.checksum("Hello, World!")).to eq(0xEC4AC3D0)
+    end
+
+    it "calculates correct CRC32 for binary data" do
+      data = "\x00\x01\x02\x03\xFF"
+      crc = PureRubyZip::CRC32.checksum(data)
+      expect(crc).to be_a(Integer)
+      expect(crc).to be >= 0
+      expect(crc).to be <= 0xFFFFFFFF
+    end
+
+    it "produces different checksums for different data" do
+      crc1 = PureRubyZip::CRC32.checksum("test1")
+      crc2 = PureRubyZip::CRC32.checksum("test2")
+      expect(crc1).not_to eq(crc2)
+    end
+  end
+end
+
+RSpec.describe PureRubyZip::ZipCompressor do
+  let(:compressor) { PureRubyZip::ZipCompressor.new }
+
+  describe "#compress_stored" do
+    it "returns data unchanged" do
+      data = "Hello, World!"
+      expect(compressor.compress_stored(data)).to eq(data)
+    end
+
+    it "works with binary data" do
+      data = "\x00\xFF\x01\x02"
+      expect(compressor.compress_stored(data)).to eq(data)
+    end
+  end
+
+  describe "#compress_deflate" do
+    it "compresses data" do
+      data = "Hello, World!"
+      compressed = compressor.compress_deflate(data)
+      expect(compressed).to be_a(String)
+      expect(compressed.encoding).to eq(Encoding::ASCII_8BIT)
+    end
+
+    it "produces valid DEFLATE data" do
+      data = "Test data"
+      compressed = compressor.compress_deflate(data)
+
+      # Should be able to decompress it
+      bitstream = PureRubyZip::Bitstream.new(compressed)
+      decompressor = PureRubyZip::ZipDecompressor.new
+      decompressed = decompressor.decode_zipped_file(bitstream)
+      expect(decompressed).to eq(data)
+    end
+
+    it "works with empty data" do
+      data = ""
+      compressed = compressor.compress_deflate(data)
+      expect(compressed).to be_a(String)
+    end
+  end
+end
+
+RSpec.describe PureRubyZip::ZipWriter do
+  let(:temp_dir) { Dir.mktmpdir }
+  let(:zip_path) { File.join(temp_dir, "test.zip") }
+
+  after do
+    FileUtils.rm_rf(temp_dir)
+  end
+
+  describe ".create" do
+    it "creates a ZIP file with block" do
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_buffer("Hello, World!", "hello.txt")
+      end
+
+      expect(File.exist?(zip_path)).to be true
+      expect(File.size(zip_path)).to be > 0
+    end
+
+    it "creates a valid ZIP file that can be read back" do
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_buffer("Test content", "test.txt")
+      end
+
+      # Read it back
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.entries).to include("test.txt")
+      expect(zip_file.extract("test.txt")).to eq("Test content")
+    end
+  end
+
+  describe "#add_buffer" do
+    it "adds data from memory with stored compression" do
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_buffer("Buffer content", "buffer.txt", compression: :stored)
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.extract("buffer.txt")).to eq("Buffer content")
+    end
+
+    it "adds data from memory with deflate compression" do
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_buffer("Compressed content", "compressed.txt", compression: :deflate)
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.extract("compressed.txt")).to eq("Compressed content")
+    end
+
+    it "adds multiple files" do
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_buffer("File 1", "file1.txt")
+        zip.add_buffer("File 2", "file2.txt")
+        zip.add_buffer("File 3", "file3.txt")
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.entries).to contain_exactly("file1.txt", "file2.txt", "file3.txt")
+      expect(zip_file.extract("file1.txt")).to eq("File 1")
+      expect(zip_file.extract("file2.txt")).to eq("File 2")
+      expect(zip_file.extract("file3.txt")).to eq("File 3")
+    end
+
+    it "handles binary data correctly" do
+      binary_data = (0..255).to_a.pack("C*")
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_buffer(binary_data, "binary.bin")
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.extract("binary.bin")).to eq(binary_data)
+    end
+
+    it "raises error for empty zip_path" do
+      expect {
+        PureRubyZip::ZipWriter.create(zip_path) do |zip|
+          zip.add_buffer("data", "")
+        end
+      }.to raise_error(ArgumentError, "zip_path is required")
+    end
+
+    it "raises error for unsupported compression method" do
+      expect {
+        PureRubyZip::ZipWriter.create(zip_path) do |zip|
+          zip.add_buffer("data", "file.txt", compression: :invalid)
+        end
+      }.to raise_error(ArgumentError, /Unsupported compression method/)
+    end
+  end
+
+  describe "#add_file" do
+    it "adds a file from disk" do
+      source_file = File.join(temp_dir, "source.txt")
+      File.write(source_file, "Source file content")
+
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_file(source_file)
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.entries).to include("source.txt")
+      expect(zip_file.extract("source.txt")).to eq("Source file content")
+    end
+
+    it "adds a file with custom zip_path" do
+      source_file = File.join(temp_dir, "original.txt")
+      File.write(source_file, "Original content")
+
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_file(source_file, "custom/path/renamed.txt")
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.entries).to include("custom/path/renamed.txt")
+      expect(zip_file.extract("custom/path/renamed.txt")).to eq("Original content")
+    end
+
+    it "adds multiple files from disk" do
+      file1 = File.join(temp_dir, "file1.txt")
+      file2 = File.join(temp_dir, "file2.txt")
+      File.write(file1, "Content 1")
+      File.write(file2, "Content 2")
+
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_file(file1)
+        zip.add_file(file2, "renamed.txt")
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.entries).to contain_exactly("file1.txt", "renamed.txt")
+      expect(zip_file.extract("file1.txt")).to eq("Content 1")
+      expect(zip_file.extract("renamed.txt")).to eq("Content 2")
+    end
+
+    it "raises error for non-existent file" do
+      expect {
+        PureRubyZip::ZipWriter.create(zip_path) do |zip|
+          zip.add_file("/nonexistent/file.txt")
+        end
+      }.to raise_error(Errno::ENOENT)
+    end
+
+    it "raises error for directory" do
+      dir = File.join(temp_dir, "subdir")
+      FileUtils.mkdir_p(dir)
+
+      expect {
+        PureRubyZip::ZipWriter.create(zip_path) do |zip|
+          zip.add_file(dir)
+        end
+      }.to raise_error(ArgumentError, /Cannot add directory/)
+    end
+
+    it "preserves file content exactly" do
+      source_file = File.join(temp_dir, "binary.bin")
+      binary_content = (0..255).to_a.pack("C*") * 10
+      File.binwrite(source_file, binary_content)
+
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_file(source_file)
+      end
+
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.extract("binary.bin")).to eq(binary_content)
+    end
+  end
+
+  describe "integration tests" do
+    it "creates a complex archive with mixed content" do
+      # Create test files
+      file1 = File.join(temp_dir, "document.txt")
+      file2 = File.join(temp_dir, "data.csv")
+      File.write(file1, "Document content")
+      File.write(file2, "col1,col2\n1,2\n3,4")
+
+      # Create ZIP
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_file(file1, "docs/document.txt", compression: :deflate)
+        zip.add_file(file2, "exports/data.csv", compression: :stored)
+        zip.add_buffer("README", "README.md", compression: :deflate)
+        zip.add_buffer("License text", "LICENSE", compression: :stored)
+      end
+
+      # Verify
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.size).to eq(4)
+      expect(zip_file.entries).to contain_exactly(
+        "docs/document.txt",
+        "exports/data.csv",
+        "README.md",
+        "LICENSE"
+      )
+
+      # Verify content
+      expect(zip_file.extract("docs/document.txt")).to eq("Document content")
+      expect(zip_file.extract("exports/data.csv")).to eq("col1,col2\n1,2\n3,4")
+      expect(zip_file.extract("README.md")).to eq("README")
+      expect(zip_file.extract("LICENSE")).to eq("License text")
+    end
+
+    it "creates ZIP files compatible with standard tools" do
+      PureRubyZip::ZipWriter.create(zip_path) do |zip|
+        zip.add_buffer("Test file 1", "file1.txt")
+        zip.add_buffer("Test file 2", "file2.txt")
+      end
+
+      # Verify it's a valid ZIP file by reading it back
+      zip_file = PureRubyZip::ZipFile.new(zip_path)
+      expect(zip_file.size).to eq(2)
+
+      # Extract all files
+      results = zip_file.extract_all
+      expect(results.length).to eq(2)
+      expect(results.map { |r| r[:path] }).to contain_exactly("file1.txt", "file2.txt")
+    end
+  end
+end

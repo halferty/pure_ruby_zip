@@ -1,14 +1,16 @@
 # PureRubyZip
 
-A pure-Ruby ZIP file decompressor with no external dependencies. This library provides a clean API for reading and extracting ZIP archives, with comprehensive error handling and security protections.
+A pure-Ruby ZIP file library with no external dependencies. This library provides a clean API for reading, extracting, and creating ZIP archives, with comprehensive error handling and security protections.
 
 ## Features
 
 - **Pure Ruby**: No external dependencies, works on any Ruby platform
+- **Full ZIP Support**: Read and write ZIP archives with ease
 - **DEFLATE Support**: Handles both stored (uncompressed) and DEFLATE compressed files
 - **Security**: Built-in protections against path traversal and zip bombs
 - **Comprehensive Error Handling**: Detailed error messages for debugging
 - **Flexible API**: Extract single files, all files, or files matching patterns
+- **Block-based Writer**: Clean, intuitive API for creating ZIP files
 - **Memory Efficient**: Optimized for performance with large archives
 - **Well Tested**: Comprehensive test suite with RSpec
 
@@ -40,7 +42,9 @@ pure-ruby-zip archive.zip
 
 ### Library Usage
 
-#### Basic Example
+#### Reading ZIP Files
+
+##### Basic Example
 
 ```ruby
 require "pure_ruby_zip"
@@ -158,6 +162,130 @@ zip.decompress_all_files                  # alias for extract_all
 zip.decompress_all_files_to_disk          # alias for extract_to_disk
 ```
 
+#### Creating ZIP Files
+
+PureRubyZip now supports creating ZIP archives with a clean, block-based API.
+
+##### Basic Example
+
+```ruby
+require "pure_ruby_zip"
+
+# Create a new ZIP file
+PureRubyZip::ZipWriter.create("archive.zip") do |zip|
+  # Add a file from memory
+  zip.add_buffer("Hello, World!", "hello.txt")
+
+  # Add a file from disk (uses basename)
+  zip.add_file("data.csv")
+
+  # Add a file with custom path in ZIP
+  zip.add_file("report.pdf", "documents/2024/report.pdf")
+end
+```
+
+##### Adding Files from Memory
+
+```ruby
+PureRubyZip::ZipWriter.create("data.zip") do |zip|
+  # Add string content
+  zip.add_buffer("Some text content", "file.txt")
+
+  # Add binary data
+  binary_data = File.binread("image.png")
+  zip.add_buffer(binary_data, "images/logo.png")
+
+  # Add generated content
+  csv_data = "name,age\nJohn,30\nJane,25"
+  zip.add_buffer(csv_data, "exports/data.csv")
+end
+```
+
+##### Adding Files from Disk
+
+```ruby
+PureRubyZip::ZipWriter.create("backup.zip") do |zip|
+  # Add file with its original basename
+  zip.add_file("config.json")
+  # Creates: config.json in the ZIP
+
+  # Add file with custom path in ZIP
+  zip.add_file("config.json", "configs/production.json")
+  # Creates: configs/production.json in the ZIP
+
+  # Add multiple files
+  Dir["logs/*.log"].each do |log_file|
+    zip.add_file(log_file, "logs/#{File.basename(log_file)}")
+  end
+end
+```
+
+##### Compression Options
+
+```ruby
+PureRubyZip::ZipWriter.create("mixed.zip") do |zip|
+  # Use DEFLATE compression (default)
+  zip.add_buffer("Text content", "compressed.txt", compression: :deflate)
+
+  # Use stored (no compression) for already-compressed files
+  zip.add_file("image.jpg", compression: :stored)
+  zip.add_file("video.mp4", compression: :stored)
+
+  # DEFLATE is good for text files
+  zip.add_file("data.csv", compression: :deflate)
+end
+```
+
+##### Complete Example: Creating an Archive
+
+```ruby
+require "pure_ruby_zip"
+
+# Create a project archive
+PureRubyZip::ZipWriter.create("project-backup.zip") do |zip|
+  # Add project files
+  zip.add_file("README.md")
+  zip.add_file("LICENSE")
+
+  # Add source files with directory structure
+  Dir["lib/**/*.rb"].each do |file|
+    zip.add_file(file)
+  end
+
+  # Add generated metadata
+  metadata = {
+    created_at: Time.now,
+    version: "1.0.0",
+    files_count: Dir["lib/**/*.rb"].length
+  }.to_json
+  zip.add_buffer(metadata, "metadata.json")
+
+  # Add a manifest
+  files_list = Dir["lib/**/*.rb"].join("\n")
+  zip.add_buffer(files_list, "MANIFEST.txt")
+end
+
+# Verify the archive
+zip = PureRubyZip::ZipFile.new("project-backup.zip")
+puts "Created archive with #{zip.size} files"
+puts zip.entries
+```
+
+##### Round-trip Example
+
+```ruby
+# Create a ZIP file
+PureRubyZip::ZipWriter.create("test.zip") do |zip|
+  zip.add_buffer("Original content", "file.txt")
+  zip.add_buffer("More data", "data.txt")
+end
+
+# Read it back
+zip = PureRubyZip::ZipFile.new("test.zip")
+puts zip.extract("file.txt")  # => "Original content"
+puts zip.extract("data.txt")  # => "More data"
+```
+
 ## Security
 
 PureRubyZip includes several security features:
@@ -174,10 +302,10 @@ PureRubyZip includes several security features:
 
 ## Limitations
 
-- **Read-only**: This library only supports reading/extracting ZIP files, not creating them
 - **No ZIP64**: Does not support ZIP64 extensions for very large archives
 - **No Encryption**: Does not support encrypted ZIP files
-- **Single-threaded**: Extraction is single-threaded
+- **Basic Compression**: Uses uncompressed DEFLATE blocks (future versions will add LZ77 compression)
+- **Single-threaded**: Operations are single-threaded
 
 ## Performance
 
@@ -239,6 +367,16 @@ The gem is available as open source under the terms of the [MIT License](https:/
 Created by Edward Halferty (me@edwardhalferty.com)
 
 ## Changelog
+
+### Version 0.1.5 (Current)
+- **NEW**: ZIP file creation support with block-based API
+- Added `ZipWriter` class for creating ZIP archives
+- Added `add_file(path, zip_path)` method to add files from disk
+- Added `add_buffer(data, zip_path)` method to add data from memory
+- Support for both stored and DEFLATE compression when writing
+- CRC32 checksum calculation for data integrity
+- Comprehensive tests for compression functionality
+- Updated documentation with compression examples
 
 ### Version 0.1.4
 - Complete rewrite with comprehensive improvements
